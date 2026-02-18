@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Databases / local state
+data.db
+*.sqlite3
+*.db
+
+# Scrapy / Playwright debug artifacts
+walmart_scraper/debug_*.html
+walmart_scraper/debug_*.png
+walmart_scraper/walmart_storage.json
+walmart_scraper/scraped_*.json
+
+# Node / frontend
+node_modules/
+frontend/node_modules/
+dist/
+build/
+
+# IDE / OS
+.vscode/
+.DS_Store
+.idea/
+*.log
+.env
+.env.local
+.env.*.local
+
+# Testing
+.pytest_cache/
+
+# Composer / lockfiles
+package-lock.json
+yarn.lock

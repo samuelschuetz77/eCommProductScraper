@@ -1,0 +1,52 @@
+[
+    {
+        "name": "Laptop",
+        "price": 899.99,
+        "image": "https://i5.walmartimages.com/seo/HP-15-6-FHD-Laptop-Intel-Core-i5-1135G7-8GB-RAM-256GB-SSD-Natural-Silver-Windows-11-Home-15-dy2795wm_1fcaf032-4d23-4a34-a698-9588c24f6a49.b338a7de53381e483561919934c75267.jpeg"
+    },
+    {
+        "name": "Smartphone",
+        "price": 699.99,
+        "image": "https://i5.walmartimages.com/seo/AT-T-iPhone-13-128GB-Blue-Prepaid-Smartphone_1a2b3c4d-5e6f-7890-1234-567890abcdef.jpeg"
+    },
+    {
+        "name": "Headphones",
+        "price": 149.99,
+        "image": "https://i5.walmartimages.com/seo/Beats-Studio3-Wireless-Noise-Cancelling-Headphones-with-Apple-W1-Headphone-Chip-Matte-Black_b3a7a9a1-b0b3-4f3e-9e8a-2c3b6d2b0f2a.jpeg"
+    },
+    {
+        "name": "Smart Watch",
+        "price": 249.99,
+        "image": "https://i5.walmartimages.com/seo/onn-Smart-Watch-with-GPS-Black_1a2b3c4d-5e6f-7890-1234-567890abcdef.jpeg"
+    },
+    {
+        "name": "Tablet",
+        "price": 449.99,
+        "image": "https://i5.walmartimages.com/seo/onn-10-1-Android-Tablet-32GB-Storage-2GB-RAM-2022-Model-Charcoal_1a2b3c4d-5e6f-7890-1234-567890abcdef.jpeg"
+    },
+    {
+        "name": "Camera",
+        "price": 549.99,
+        "image": "https://i5.walmartimages.com/seo/Canon-EOS-Rebel-T7-DSLR-Camera-with-18-55mm-Lens-and-Accessory-Bundle_1a2b3c4d-5e6f-7890-1234-567890abcdef.jpeg"
+    },
+    {
+        "name": "Gaming Console",
+        "price": 499.99,
+        "image": "https://i5.walmartimages.com/seo/Sony-PlayStation-5-Console_1a2b3c4d-5e6f-7890-1234-567890abcdef.jpeg"
+    },
+    {
+        "name": "Wireless Mouse",
+        "price": 29.99,
+        "image": "https://i5.walmartimages.com/seo/onn-Wireless-Mouse-with-USB-Receiver-Black_1a2b3c4d-5e6f-7890-1234-567890abcdef.jpeg"
+    },
+    {
+        "name": "Keyboard",
+        "price": 49.99,
+        "image": "https://i5.walmartimages.com/seo/onn-Full-Size-Wired-Keyboard-Black_1a2b3c4d-5e6f-7890-1234-567890abcdef.jpeg"
+    },
+    {
+        "name": "Monitor",
+        "price": 199.99,
+        "image": "https://i5.walmartimages.com/seo/HP-24-FHD-IPS-Monitor-with-AMD-FreeSync-HDMI-and-VGA-Black-M24f_1a2b3c4d-5e6f-7890-1234-567890abcdef.jpeg"
+    }
+]
