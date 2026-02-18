@@ -66,9 +66,9 @@ def test_parse_simple_product_snippet():
     html = '''
     <html><body>
       <div data-item-id="1">
-        <a href="/ip/1"><span class="normal">Test Product</span></a>
-        <span class="f3">$12.34</span>
-        <img src="https://example.com/img.jpg" />
+        <a href="/ip/1"><span data-automation-id="product-title">Test Product</span></a>
+        <div data-automation-id="product-price"><div>$12.34</div></div>
+        <img data-testid="productTileImage" src="https://example.com/img.jpg" />
       </div>
     </body></html>
     '''
@@ -125,19 +125,19 @@ def test_parse_two_wallet_products_respects_limit():
     html = '''
     <html><body>
       <div data-item-id="1">
-        <a href="/ip/1"><span class="normal">Wallet A</span></a>
-        <span class="f3">$10.00</span>
-        <img src="https://example.com/a.jpg" />
+        <a href="/ip/1"><span data-automation-id="product-title">Wallet A</span></a>
+        <div data-automation-id="product-price"><div>$10.00</div></div>
+        <img data-testid="productTileImage" src="https://example.com/a.jpg" />
       </div>
       <div data-item-id="2">
-        <a href="/ip/2"><span class="normal">Wallet B</span></a>
-        <span class="f3">$20.00</span>
-        <img src="https://example.com/b.jpg" />
+        <a href="/ip/2"><span data-automation-id="product-title">Wallet B</span></a>
+        <div data-automation-id="product-price"><div>$20.00</div></div>
+        <img data-testid="productTileImage" src="https://example.com/b.jpg" />
       </div>
       <div data-item-id="3">
-        <a href="/ip/3"><span class="normal">Wallet C</span></a>
-        <span class="f3">$30.00</span>
-        <img src="https://example.com/c.jpg" />
+        <a href="/ip/3"><span data-automation-id="product-title">Wallet C</span></a>
+        <div data-automation-id="product-price"><div>$30.00</div></div>
+        <img data-testid="productTileImage" src="https://example.com/c.jpg" />
       </div>
     </body></html>
     '''

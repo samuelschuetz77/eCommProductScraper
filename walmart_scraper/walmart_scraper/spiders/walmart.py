@@ -1,6 +1,8 @@
+import json
 import random
 import scrapy
 from scrapy_playwright.page import PageMethod
+from datetime import datetime
 
 USER_AGENTS = [
     # small rotation of realistic desktop UA strings
@@ -16,75 +18,13 @@ class WalmartSpider(scrapy.Spider):
     name = "walmart"
     allowed_domains = ["walmart.com"]
 
-    def __init__(self, search_term=None, min_price=None, max_price=None, num_products=None, *args, **kwargs):
+    def __init__(self, search_term='laptop', min_price=0, max_price=float('inf'), num_products=10, *args, **kwargs):
         super(WalmartSpider, self).__init__(*args, **kwargs)
         self.search_term = search_term
         self.min_price = float(min_price) if min_price else 0
         self.max_price = float(max_price) if max_price else float('inf')
-        self.num_products = int(num_products) if num_products else 2
-
-    def start_requests(self):
-        url = f"https://www.walmart.com/search?q={self.search_term}"
-
-        # rotate a plausible user-agent and set Accept-Language header
-        headers = {
-            'User-Agent': random.choice(USER_AGENTS),
-            'Accept-Language': 'en-US,en;q=0.9',
-        }
-
-        # Playwright page-method sequence to mimic a brief human session and
-        # attempt to load lazy content (scrolling) so we can find more items.
-        # scroll-until-ready evaluator: repeatedly scroll until the page
-        # contains at least `num_products` product nodes or the timeout elapses.
-        scroll_eval = (
-            "async (target) => {\n"
-            "  const start = Date.now();\n"
-            "  const timeout = 15000;\n"
-            "  const selector = 'div[data-item-id], div.search-result-gridview-item-wrapper, div.product-grid-list-view';\n"
-            "  while (Date.now() - start < timeout) {\n"
-            "    const n = document.querySelectorAll(selector).length;\n"
-            "    if (n >= target) return true;\n"
-            "    window.scrollBy(0, window.innerHeight);\n"
-            "    await new Promise(r => setTimeout(r, 500));\n"
-            "  }\n"
-            "  return false;\n"
-            "}"
-        )
-
-        # add a slightly longer timeout for pages that load slowly
-        playwright_page_methods = [
-            PageMethod("set_viewport_size", {"width": 1280, "height": 900}),
-            PageMethod("goto", "https://www.walmart.com"),
-            PageMethod("wait_for_timeout", 700),
-            PageMethod("goto", url, {"wait_until": "domcontentloaded", "timeout": 60000}),
-            PageMethod("wait_for_selector", "body", {"timeout": 60000}),
-            PageMethod("evaluate", scroll_eval, self.num_products),
-            PageMethod("wait_for_timeout", 1200),
-        ]
-
-        # reuse a previously saved Playwright storage state (if present) so we can
-        # continue a session that was manually solved via /captcha/interactive
-        try:
-            from pathlib import Path
-            base = Path(__file__).resolve().parents[1]
-            storage_file = base / 'walmart_storage.json'
-            playwright_context = {'storageState': str(storage_file)} if storage_file.exists() else None
-        except Exception:
-            storage_file = None
-            playwright_context = None
-
-        meta = dict(
-            playwright=True,
-            playwright_page_methods=playwright_page_methods,
-        )
-        if playwright_context:
-            meta['playwright_context'] = playwright_context
-
-        yield scrapy.Request(
-            url,
-            headers=headers,
-            meta=meta,
-        )
+        self.num_products = int(num_products)
+        self.results_found = 0
 
     def _first_text(self, el, *selectors):
         for s in selectors:
@@ -105,88 +45,168 @@ class WalmartSpider(scrapy.Spider):
         except Exception:
             return None
 
+    def start_requests(self):
+        url = f"https://www.walmart.com/search?q={self.search_term}"
+        
+        # 1. Reuse storage state if available (manual captcha solve)
+        meta = {
+            "playwright": True,
+            "playwright_include_page": True, # Vital for debugging
+            "playwright_page_methods": [
+                PageMethod("wait_for_selector", "div#main-content, script[id='__NEXT_DATA__']", {"timeout": 30000}),
+                # Scroll a bit to trigger lazy loading if we fall back to DOM scraping
+                PageMethod("evaluate", "window.scrollBy(0, document.body.scrollHeight)"),
+                PageMethod("wait_for_timeout", 2000), 
+            ],
+        }
+
+        # Check for storage state (look in the package directory so tests and runs agree)
+        from pathlib import Path
+        base = Path(__file__).resolve().parents[1]
+        storage_path = base / 'walmart_storage.json'
+        if storage_path.exists():
+            meta["playwright_context"] = {"storageState": str(storage_path)}
+            self.logger.info("Loaded manual captcha session.")
+
+        yield scrapy.Request(url, meta=meta, callback=self.parse)
+
     def parse(self, response):
-        count = 0
-        # prefer explicit product containers, but accept several variants
-        product_nodes = response.css("div[data-item-id], div.search-result-gridview-item-wrapper, div.product-grid-list-view")
-        self.logger.info('Found %d product nodes on page', len(product_nodes))
+        # `response.meta` may not exist in unit tests (Response not tied to a Request).
+        try:
+            resp_meta = response.meta
+        except AttributeError:
+            resp_meta = {}
 
-        for product in product_nodes:
-            if count >= self.num_products:
-                break
+        page = resp_meta.get("playwright_page")
+        
+        # METHOD A: The "Precision" Method (JSON Data)
+        # Walmart injects the entire product state into a script tag. 
+        # Extracting this is clean, fast, and gives 100% accurate data.
+        next_data = response.xpath('//script[@id="__NEXT_DATA__"]/text()').get()
+        
+        if next_data:
+            self.logger.info("Found __NEXT_DATA__ JSON blob. Extracting structured data...")
+            try:
+                data = json.loads(next_data)
+                # Navigate the JSON Jungle
+                props = data.get('props', {}).get('pageProps', {}).get('initialData', {}).get('searchResult', {}).get('itemStacks', [])
+                
+                items = []
+                for stack in props:
+                    items.extend(stack.get('items', []))
 
-            name = self._first_text(product, 'span.normal::text', 'a.product-title-link::text', 'h2.product-title::text')
-            price_txt = self._first_text(product, 'span.f3::text', 'span.price-characteristic::attr(content)', 'span.price-main::text', 'meta[itemprop="price"]::attr(content)')
-            price = self._parse_price(price_txt)
+                for item in items:
+                    if self.results_found >= self.num_products: break
+                    if item.get('__typename') != 'Product': continue
 
-            # image handling: try several attributes (may be lazy-loaded)
-            image = (product.css('img::attr(src)').get()
-                     or product.css('img::attr(data-src)').get()
-                     or (product.css('img::attr(srcset)').get() or '').split(',')[0].split(' ')[0]
-                     or None)
+                    product = {
+                        'name': item.get('name'),
+                        'price': item.get('priceInfo', {}).get('currentPrice', {}).get('price'),
+                        'image': item.get('image'),
+                        'link': f"https://www.walmart.com{item.get('canonicalUrl', '')}",
+                        'source': 'json_extraction'
+                    }
 
-            link = product.css('a::attr(href)').get()
-            link = response.urljoin(link) if link else None
+                    # Filter Logic
+                    if product['price']:
+                        p = float(product['price'])
+                        if p < self.min_price or p > self.max_price:
+                            continue
 
-            # collect additional thumbnail URLs if present on the list card
-            thumbs = [
-                v.strip() for v in (
-                    product.css('img::attr(srcset)').get() or ''
-                ).split(',') if v.strip()
-            ]
-            images = [image] + thumbs if image else thumbs
+                    self.results_found += 1
+                    yield product
+                
+                return # Exit if JSON method worked
+            except Exception as e:
+                self.logger.error(f"JSON extraction failed: {e}. Falling back to DOM.")
 
-            incomplete = False
+        # METHOD B: The "Brute Force" Method (DOM Scraping)
+        # Updated selectors for 2025 structure
+        self.logger.info("Falling back to DOM scraping...")
+        
+        # Selectors: These are more robust than '.normal'
+        product_cards = response.css('div[data-item-id]')
+        
+        if not product_cards:
+            self.logger.warning("No product cards found. Possible Captcha or Layout change.")
+            # Dump HTML for debugging
+            from pathlib import Path
+            debug_path = Path(__file__).parent.parent.parent / f"debug_failed_{datetime.now().timestamp()}.html"
+            with open(debug_path, 'w', encoding='utf-8') as f:
+                f.write(response.text)
+            self.logger.info(f"Saved debug HTML to {debug_path}")
+            return
+
+        for card in product_cards:
+            if self.results_found >= self.num_products: break
+
+            # Try multiple selectors for each field
+            name = (card.css('span[data-automation-id="product-title"]::text').get() or 
+                    card.css('a span.w_iUH7::text').get() or 
+                    card.css('.f6.f5-l::text').get())
+            
+            price_text = (card.css('div[data-automation-id="product-price"] div::text').get() or 
+                          card.css('.aa88::text').get() or 
+                          "0")
+            
+            # Clean price
+            import re
+            price_match = re.search(r'\$?([\d,]+\.?\d*)', price_text)
+            price = float(price_match.group(1).replace(',', '')) if price_match else 0
+
+            image = (card.css('img[data-testid="productTileImage"]::attr(src)').get() or 
+                     card.css('img::attr(src)').get())
+            
+            link = card.css('a::attr(href)').get()
+            if link and not link.startswith('http'):
+                link = "https://www.walmart.com" + link
+
+            # detect missing fields so we can optionally follow the detail page
             missing = []
             if not name:
                 missing.append('name')
-            if price is None:
+            if not price:
                 missing.append('price')
             if not image:
                 missing.append('image')
             if not link:
                 missing.append('link')
-            if missing:
-                incomplete = True
 
-            item = {
-                'name': name,
+            # if critical fields missing, follow the detail page to enrich
+            if missing and link:
+                self.logger.info('Missing fields on list card — following detail for %s missing=%s', link, missing)
+                detail_methods = [
+                    PageMethod("set_viewport_size", {"width": 1200, "height": 900}),
+                    PageMethod("goto", link, {"wait_until": "domcontentloaded"}),
+                    PageMethod("wait_for_selector", "body"),
+                    PageMethod("wait_for_timeout", 500),
+                ]
+                partial = {
+                    'name': name,
+                    'price': price,
+                    'image': image,
+                    'link': link,
+                    'incomplete': True,
+                    'missing_fields': missing,
+                }
+                yield scrapy.Request(link, callback=self.parse_product_detail, meta={
+                    'playwright': True,
+                    'playwright_page_methods': detail_methods,
+                    'partial_item': partial,
+                })
+                continue
+
+            if price < self.min_price or price > self.max_price:
+                continue
+
+            self.results_found += 1
+            yield {
+                'name': name.strip() if name else 'Unknown',
                 'price': price,
                 'image': image,
-                'images': images if images else [],
                 'link': link,
-                'incomplete': incomplete,
-                'missing_fields': missing,
+                'source': 'dom_scrape'
             }
-
-            if incomplete:
-                self.logger.debug('Incomplete item found (may be placeholder/ad): %s', missing)
-
-                # If we have a link, follow the product detail page to try and fill
-                # missing fields — more reliable for title/price/image.
-                if link:
-                    self.logger.info('Following detail page to enrich incomplete item: %s', link)
-                    detail_methods = [
-                        PageMethod("set_viewport_size", {"width": 1200, "height": 900}),
-                        PageMethod("goto", link, {"wait_until": "domcontentloaded"}),
-                        PageMethod("wait_for_selector", "body"),
-                        PageMethod("wait_for_timeout", 500),
-                    ]
-                    yield scrapy.Request(link, callback=self.parse_product_detail, meta={
-                        'playwright': True,
-                        'playwright_page_methods': detail_methods,
-                        'partial_item': item,
-                    })
-                    continue
-
-            # always yield items (we'll mark completeness later in DB); this lets us
-            # capture entries that might be missing prices but have useful info.
-            self.logger.info('Yielding item link=%s name=%s price=%s incomplete=%s', link, name, price, incomplete)
-            yield item
-            count += 1
-
-        if count == 0:
-            self.logger.info('No items yielded from parse — page may be blocked or selectors need updating')
 
     def parse_product_detail(self, response):
         """Parse a product detail page to enrich a previously yielded partial
@@ -198,7 +218,11 @@ class WalmartSpider(scrapy.Spider):
         # fallback selectors on product detail pages (also collect gallery thumbnails)
         name = (self._first_text(response, 'h1.prod-ProductTitle::text', 'h1[itemprop="name"]::text', 'h1::text') or partial.get('name'))
         price_txt = (self._first_text(response, 'span.price-characteristic::attr(content)', 'meta[itemprop="price"]::attr(content)', 'span.price::text') or '')
-        price = self._parse_price(price_txt) if price_txt else partial.get('price')
+        price = None
+        if price_txt:
+            price = float(price_txt) if price_txt.replace('.','',1).isdigit() else None
+        else:
+            price = partial.get('price')
 
         # gather hero + gallery images (src and srcset)
         images = []
@@ -243,5 +267,4 @@ class WalmartSpider(scrapy.Spider):
         else:
             self.logger.info('Enriched item from detail page: %s', merged['link'])
 
-        self.logger.info('Yielding enriched item: %s (incomplete=%s)', merged.get('link'), merged.get('incomplete'))
         yield merged
