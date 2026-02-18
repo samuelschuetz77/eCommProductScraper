@@ -143,6 +143,10 @@
 
   <!-- fixed responsive spacer so sticky panel never overlaps content -->
   <div class="h-6 sm:h-32 md:h-64 lg:h-96" aria-hidden="true"></div>
+  <!-- extra invisible divs requested by user (guarantee separation) -->
+  <div class="h-8 w-full flex-shrink-0" aria-hidden="true"></div>
+  <div class="h-8 w-full flex-shrink-0" aria-hidden="true"></div>
+  <div class="h-8 w-full flex-shrink-0" aria-hidden="true"></div>
 
   <div class="w-[90%] md:w-[80%] pb-20 mt-6 sm:mt-32 md:mt-64 lg:mt-96">
     {#if errorMsg}
@@ -166,7 +170,7 @@
                         <td class="p-4 align-top border-r border-black/10">
                             <div class="w-24 h-24 md:w-32 md:h-32 border-2 border-black bg-white flex items-center justify-center p-2 mx-auto shadow-[4px_4px_0px_0px_rgba(0,0,0,0.1)]">
                                 {#if product.image}
-                                    <img src={product.image} alt="thumb" class="max-w-full max-h-full object-contain grayscale group-hover:grayscale-0 transition-all">
+                                    <img src={product.image} alt="thumb" class="max-w-full max-h-full object-contain transition-all">
                                 {:else}
                                     <span class="text-[10px] text-gray-400 font-mono">NO_DATA</span>
                                 {/if}
