@@ -1,5 +1,5 @@
 <script>
-  import { fade, fly } from 'svelte/transition';
+  import { fade, fly, slide } from 'svelte/transition';
 
   let searchTerm = '';
   let minPrice = '';
@@ -9,11 +9,24 @@
   let loading = false;
   let manualSolve = false;
   let errorMsg = '';
+  
+  // Track which rows are expanded (by index)
+  let expandedRows = new Set();
+
+  function toggleDetails(index) {
+    if (expandedRows.has(index)) {
+        expandedRows.delete(index);
+    } else {
+        expandedRows.add(index);
+    }
+    expandedRows = expandedRows; // Trigger reactivity
+  }
 
   async function scrape() {
     loading = true;
     errorMsg = '';
     products = [];
+    expandedRows = new Set(); // Reset expansions on new search
 
     const formData = new FormData();
     formData.append('searchTerm', searchTerm);
@@ -115,27 +128,58 @@
     {/if}
 
     {#if products.length > 0}
-      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6" in:fade>
-        {#each products as product}
-          <div class="border-2 border-black bg-white p-0 hover:shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] transition-all duration-200 group">
-            
-            <div class="w-full h-48 bg-white border-b-2 border-black p-6 flex items-center justify-center relative overflow-hidden">
-                {#if product.image}
-                    <img src={product.image} alt={product.name} class="max-h-full max-w-full object-contain grayscale group-hover:grayscale-0 transition-all duration-300">
-                {:else}
-                    <div class="text-gray-300 font-['JetBrains_Mono'] text-xs">NO_IMAGE</div>
-                {/if}
-            </div>
+      <div class="border-2 border-black bg-white shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] overflow-hidden" in:fade>
+        <table class="w-full border-collapse text-left">
+            <thead class="bg-black text-white font-['JetBrains_Mono'] uppercase text-xs tracking-wider">
+                <tr>
+                    <th class="p-4 border-b-2 border-black w-24 text-center">Img</th>
+                    <th class="p-4 border-b-2 border-black">Product Data</th>
+                    <th class="p-4 border-b-2 border-black w-32 text-right">Price</th>
+                    <th class="p-4 border-b-2 border-black w-32 text-center">Action</th>
+                </tr>
+            </thead>
+            <tbody class="divide-y-2 divide-gray-100">
+                {#each products as product, i}
+                    <tr class="hover:bg-gray-50 transition-colors group">
+                        <td class="p-4 align-top">
+                            <div class="w-16 h-16 border border-gray-200 bg-white flex items-center justify-center p-1 overflow-hidden">
+                                {#if product.image}
+                                    <img src={product.image} alt="thumbnail" class="max-w-full max-h-full object-contain">
+                                {:else}
+                                    <span class="text-[8px] text-gray-400 font-mono">N/A</span>
+                                {/if}
+                            </div>
+                        </td>
 
-            <div class="p-4">
-              <h3 class="font-bold text-sm leading-tight mb-3 h-10 line-clamp-2 uppercase">{product.name || 'UNKNOWN ITEM'}</h3>
-              <div class="flex justify-between items-end border-t-2 border-gray-100 pt-3">
-                 <div class="text-xl font-black">${product.price || '---'}</div>
-                 <a href={product.link} target="_blank" class="text-[10px] font-bold bg-black text-white px-2 py-1 hover:bg-gray-800">VIEW &rarr;</a>
-              </div>
-            </div>
-          </div>
-        {/each}
+                        <td class="p-4 align-top">
+                            <h3 class="font-bold text-sm uppercase leading-tight mb-1">{product.name || 'UNKNOWN ITEM'}</h3>
+                            <a href={product.link} target="_blank" class="text-[10px] text-blue-600 hover:underline font-mono truncate block max-w-md">
+                                {product.link || '#'}
+                            </a>
+                            {#if expandedRows.has(i)}
+                                <div transition:slide={{ duration: 200 }} class="mt-4 p-4 bg-gray-100 border-l-4 border-black text-xs font-mono text-gray-600">
+                                    <p class="mb-2"><strong class="text-black">SOURCE:</strong> {product.source || 'Scraper'}</p>
+                                    <p><strong class="text-black">DESCRIPTION:</strong> {product.description || 'No detailed description available in this record.'}</p>
+                                </div>
+                            {/if}
+                        </td>
+
+                        <td class="p-4 align-top text-right font-['JetBrains_Mono'] font-bold text-lg">
+                            ${product.price || '---'}
+                        </td>
+
+                        <td class="p-4 align-top text-center">
+                            <button 
+                                on:click={() => toggleDetails(i)} 
+                                class="text-[10px] uppercase font-bold tracking-widest border-2 border-black px-3 py-1 hover:bg-black hover:text-white transition-all w-full mb-2"
+                            >
+                                {expandedRows.has(i) ? 'Close' : 'Details'}
+                            </button>
+                        </td>
+                    </tr>
+                {/each}
+            </tbody>
+        </table>
       </div>
     {/if}
   </div>
