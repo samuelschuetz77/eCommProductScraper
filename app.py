@@ -155,6 +155,14 @@ def _save_products_to_db(products, search_term=None):
                 # log incomplete items for later inspection
                 if not is_complete:
                     logger.warning('Saved incomplete product (missing fields) search=%s link=%s missing=%s', search_term, link, p.get('missing_fields'))
+                    try:
+                        # append incomplete item to a troubleshooting file for offline inspection
+                        inc_file = WALMART_DIR / 'incomplete_items.jsonl'
+                        with open(inc_file, 'a', encoding='utf-8') as fh:
+                            fh.write(json.dumps({'scraped_at': datetime.utcnow().isoformat(), 'search_term': search_term, 'product': p}) + "\n")
+                        logger.info('Appended incomplete item -> %s', inc_file)
+                    except Exception:
+                        logger.exception('Failed to write incomplete item to disk')
 
             session.commit()
             logger.info('Committed %d products to DB (search_term=%s)', total_products, search_term)

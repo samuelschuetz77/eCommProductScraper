@@ -111,8 +111,20 @@ class WalmartSpider(scrapy.Spider):
                         'source': 'json_extraction'
                     }
 
+                    # normalize/validate price
+                    if product.get('price') is not None:
+                        try:
+                            product['price'] = float(product['price'])
+                        except Exception:
+                            product['price'] = self._parse_price(str(product.get('price')))
+
+                    # log missing fields for diagnostics
+                    missing = [k for k in ('name', 'price', 'image', 'link') if not product.get(k)]
+                    if missing:
+                        self.logger.debug('JSON item missing fields: %s — partial=%s', missing, {k: product.get(k) for k in ['name','price']})
+
                     # Filter Logic
-                    if product['price']:
+                    if product.get('price'):
                         p = float(product['price'])
                         if p < self.min_price or p > self.max_price:
                             continue
@@ -229,12 +241,9 @@ class WalmartSpider(scrapy.Spider):
         price_txt = (self._first_text(response, 'span.price-characteristic::attr(content)', 'meta[itemprop="price"]::attr(content)', 'span.price::text') or '')
         price = None
         if price_txt:
-            price = float(price_txt) if price_txt.replace('.','',1).isdigit() else None
-        else:
-            price = partial.get('price')
-
-        # gather hero + gallery images (src and srcset)
-        images = []
+                price = self._parse_price(price_txt)
+            else:
+                price = partial.get('price')
         hero = response.css('img.prod-hero-image::attr(src)').get() or response.css('img[itemprop="image"]::attr(src)').get()
         if hero:
             images.append(hero)
@@ -256,8 +265,22 @@ class WalmartSpider(scrapy.Spider):
                     images.append(v)
 
         image = images[0] if images else partial.get('image')
-        description = self._first_text(response, 'div.about-desc::text', 'div.prod-product-about div::text', 'meta[name="description"]::attr(content)') or partial.get('description')
 
+        # attempt JSON-LD extraction for description/name if available
+        try:
+            ld = response.xpath('//script[@type="application/ld+json"]/text()').get()
+            if ld:
+                import json as _json
+                for obj in (_json.loads(ld) if ld.strip().startswith('[') else [_json.loads(ld)]):
+                    if isinstance(obj, dict):
+                        if not description and obj.get('description'):
+                            description = obj.get('description')
+                        if not name and obj.get('name'):
+                            name = obj.get('name')
+        except Exception:
+            pass
+
+        description = description or partial.get('description')
 
         merged = {
             'name': name,
