@@ -204,12 +204,10 @@ def serve_debug_file(filename: str):
 
 @app.route('/captcha/interactive', methods=['POST'])
 def captcha_interactive():
-    """Open a headed Playwright browser so a human can solve the captcha.
+    """Headed Playwright manual solve with broader selectors + diagnostics.
 
-    - POST params: searchTerm, numProducts (optional)
-    - Blocks until either products appear or a timeout (default 5 minutes).
-    - Saves storage state (cookies) to WALMART_DIR/walmart_storage.json so future
-      automated runs can reuse the session.
+    - Returns parsed products and the DB save results.
+    - Keeps proxy support and persists Playwright storage state.
     """
     search_term = (request.form.get('searchTerm') or request.args.get('searchTerm') or '').strip()
     if not search_term:
@@ -229,10 +227,9 @@ def captcha_interactive():
         with sync_playwright() as pw:
             browser = pw.chromium.launch(headless=False)
 
-            # optional proxy for the manual solve (form param `proxy` or env WALMART_PROXY)
+            # keep optional proxy support
             proxy_str = (request.form.get('proxy') or os.environ.get('WALMART_PROXY') or '').strip()
             if proxy_str:
-                # normalize and parse credentials if present
                 from urllib.parse import urlparse
                 if '://' not in proxy_str:
                     proxy_str = 'http://' + proxy_str
@@ -247,58 +244,63 @@ def captcha_interactive():
                 context = browser.new_context()
 
             page = context.new_page()
-            logger.info('Opened headed browser for manual captcha solve; URL=%s', search_url)
-            # navigate but don't require 'networkidle' (some sites keep background XHRs open)
+            logger.info('Navigating to %s for interactive solve', search_url)
             try:
                 page.goto(search_url, wait_until='domcontentloaded', timeout=60000)
             except PWTimeout:
-                logger.warning('Initial goto timed out; attempting fallback navigation without waiting')
-                try:
-                    page.goto(search_url, timeout=0)
-                except Exception:
-                    browser.close()
-                    return jsonify({'error': 'Failed to open page for manual captcha solve'}), 500
+                logger.error('Initial navigation timed out')
+                browser.close()
+                return jsonify({'error': 'Failed to open page for manual captcha solve'}), 500
 
-            # brief pause to allow client-side rendering to start
-            page.wait_for_timeout(1000)
-
-            # wait for either product results or user to solve captcha (long timeout)
+            # wait for product grid (human solve may be required)
             try:
                 page.wait_for_selector('div[data-item-id], div.search-result-gridview-item-wrapper', timeout=300000)
             except PWTimeout:
-                # timeout waiting for results
                 browser.close()
-                return jsonify({'error': 'Timed out waiting for manual captcha solve'}), 504
+                return jsonify({'error': 'Timed out waiting for product grid'}), 504
 
-            # extract product entries directly from the Playwright page
             elems = page.query_selector_all('div[data-item-id]') or page.query_selector_all('div.search-result-gridview-item-wrapper')
-            for el in elems[:num_products]:
+            logger.info('Found %d product candidate elements', len(elems))
+
+            for i, el in enumerate(elems[:num_products]):
                 try:
-                    name = el.query_selector('span.normal')
-                    name = name.inner_text().strip() if name else (el.query_selector('a.product-title-link') and el.query_selector('a.product-title-link').inner_text().strip())
-                    price_el = el.query_selector('span.f3') or el.query_selector('span.price-characteristic')
-                    price_text = price_el.inner_text().strip() if price_el else None
-                    price = None
+                    # TITLE: multiple fallbacks
+                    name_el = el.query_selector('span.normal') or el.query_selector('span[data-automation-id="product-title"]') or el.query_selector('a > span') or el.query_selector('h2')
+                    name = name_el.inner_text().strip() if name_el else 'Unknown Item'
+
+                    # PRICE: broadened selectors + debug logging
+                    price_el = el.query_selector('div[data-automation-id="product-price"] span') or el.query_selector('span.f2') or el.query_selector('span.w_iUH7') or el.query_selector('span.price-characteristic')
+                    raw_price_text = price_el.inner_text().strip() if price_el else ''
+                    logger.debug('Interactive parse - item %d raw price: "%s"', i, raw_price_text)
+
+                    # sanitize price
                     try:
-                        # sanitize price string and fall back to 0.0 when parsing fails
-                        clean_price = ''.join(ch for ch in (price_text or '') if (ch.isdigit() or ch == '.'))
-                        price = float(clean_price) if clean_price else 0.0
-                    except (ValueError, TypeError):
+                        clean_text = ''.join(ch for ch in raw_price_text if (ch.isdigit() or ch == '.'))
+                        price = float(clean_text) if clean_text else 0.0
+                    except Exception:
                         price = 0.0
 
-                    image = el.query_selector('img')
-                    image = image.get_attribute('src') if image else None
+                    # IMAGE
+                    img_el = el.query_selector('img')
+                    image = img_el.get_attribute('src') if img_el else None
+
+                    # LINK
                     link_el = el.query_selector('a')
                     link = link_el.get_attribute('href') if link_el else None
                     if link and link.startswith('/'):
-                        link = f'https://www.walmart.com{link}'
-                    products.append({'name': name, 'price': price, 'image': image, 'link': link})
-                except Exception:
-                    logger.exception('Failed to parse a product element')
+                        link = f"https://www.walmart.com{link}"
 
-            # save storage state (cookies/localStorage)
+                    # SHORT DESCRIPTION (if present on card)
+                    desc_el = el.query_selector('div.search-result-productdescription') or el.query_selector('div.prod-ProductCard-description')
+                    description = desc_el.inner_text().strip() if desc_el else 'Extracted via Interactive Mode'
+
+                    products.append({'name': name, 'price': price, 'image': image, 'link': link, 'description': description})
+                    logger.info('Parsed interactive item %d: %s — $%s', i, (name[:60] + '...') if len(name) > 60 else name, price)
+                except Exception as e:
+                    logger.exception('Failed to parse interactive element %s', e)
+
+            # persist storage state
             try:
-                # ask Playwright to write the storage state file directly (more reliable)
                 context.storage_state(path=str(storage_path))
                 logger.info('Saved Playwright storage state -> %s', storage_path)
             except Exception:
@@ -306,14 +308,17 @@ def captcha_interactive():
 
             browser.close()
 
-        # persist to DB (best-effort)
+        # Save to DB and log details
         try:
             saved = _save_products_to_db(products, search_term=search_term)
         except Exception:
-            logger.exception('Error while saving products from interactive solve')
+            logger.exception('DB save failed for interactive products')
             saved = []
 
-        # Build and return response (previously missing) so the client receives results
+        # Force-print saved IDs/status for clarity
+        for s in saved:
+            logger.info('DB save result: %s', s)
+
         resp = {'count': len(products), 'products': products, 'saved': saved}
         try:
             if storage_path.exists():
@@ -324,9 +329,9 @@ def captcha_interactive():
         logger.info('Interactive captcha solved — returning %d products', len(products))
         return jsonify(resp)
 
-    except Exception:
+    except Exception as e:
         logger.exception('Interactive captcha flow failed')
-        return jsonify({'error': 'Interactive captcha flow failed'}), 500
+        return jsonify({'error': str(e)}), 500
 
 # --- routes ---------------------------------------------------------------
 @app.route('/')
