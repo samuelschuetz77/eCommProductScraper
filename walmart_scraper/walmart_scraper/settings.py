@@ -26,6 +26,25 @@ ROBOTSTXT_OBEY = False
 CONCURRENT_REQUESTS_PER_DOMAIN = 1
 DOWNLOAD_DELAY = 1
 
+# Randomize delays and enable AutoThrottle to better mimic human browsing
+RANDOMIZE_DOWNLOAD_DELAY = True
+AUTOTHROTTLE_ENABLED = True
+AUTOTHROTTLE_START_DELAY = 2.0
+AUTOTHROTTLE_MAX_DELAY = 10.0
+AUTOTHROTTLE_TARGET_CONCURRENCY = 1.0
+
+# Proxy rotation — populate with residential proxies (comma-separated in env or edit below)
+# Examples: "http://user:pass@1.2.3.4:8000", "http://5.6.7.8:3128"
+PROXY_LIST = []
+
+# Enable downloader middlewares: user-agent rotation + rotating proxy
+DOWNLOADER_MIDDLEWARES = {
+    "walmart_scraper.middlewares.RandomUserAgentMiddleware": 400,
+    "scrapy.downloadermiddlewares.useragent.UserAgentMiddleware": None,
+    "scrapy.downloadermiddlewares.httpproxy.HttpProxyMiddleware": 750,
+    "walmart_scraper.middlewares.RotatingProxyMiddleware": 760,
+}
+
 # Disable cookies (enabled by default)
 #COOKIES_ENABLED = False
 
@@ -96,4 +115,11 @@ TWISTED_REACTOR = "twisted.internet.asyncioreactor.AsyncioSelectorReactor"
 
 PLAYWRIGHT_LAUNCH_OPTIONS = {
     "headless": True,
+    "args": [
+        "--disable-blink-features=AutomationControlled",
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+    ],
+    # keep default args minimal so Playwright is less detectable
+    # per-request proxy will be injected by middleware into playwright_context
 }

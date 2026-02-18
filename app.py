@@ -220,7 +220,24 @@ def captcha_interactive():
         from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
         with sync_playwright() as pw:
             browser = pw.chromium.launch(headless=False)
-            context = browser.new_context()
+
+            # optional proxy for the manual solve (form param `proxy` or env WALMART_PROXY)
+            proxy_str = (request.form.get('proxy') or os.environ.get('WALMART_PROXY') or '').strip()
+            if proxy_str:
+                # normalize and parse credentials if present
+                from urllib.parse import urlparse
+                if '://' not in proxy_str:
+                    proxy_str = 'http://' + proxy_str
+                p = urlparse(proxy_str)
+                proxy_opts = {'server': f"{p.scheme}://{p.hostname}:{p.port}"}
+                if p.username:
+                    proxy_opts['username'] = p.username
+                    proxy_opts['password'] = p.password
+                context = browser.new_context(proxy=proxy_opts)
+                logger.info('Launched manual solve browser with proxy=%s', proxy_opts.get('server'))
+            else:
+                context = browser.new_context()
+
             page = context.new_page()
             logger.info('Opened headed browser for manual captcha solve; URL=%s', search_url)
             # navigate but don't require 'networkidle' (some sites keep background XHRs open)

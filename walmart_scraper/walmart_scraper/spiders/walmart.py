@@ -48,11 +48,15 @@ class WalmartSpider(scrapy.Spider):
     def start_requests(self):
         url = f"https://www.walmart.com/search?q={self.search_term}"
         
+        # pick a realistic User-Agent for this request (also used by middleware)
+        ua = random.choice(USER_AGENTS)
+
         # 1. Reuse storage state if available (manual captcha solve)
         meta = {
             "playwright": True,
             "playwright_include_page": True, # Vital for debugging
             "playwright_page_methods": [
+                PageMethod("set_extra_http_headers", {"user-agent": ua}),
                 PageMethod("wait_for_selector", "div#main-content, script[id='__NEXT_DATA__']", {"timeout": 30000}),
                 # Scroll a bit to trigger lazy loading if we fall back to DOM scraping
                 PageMethod("evaluate", "window.scrollBy(0, document.body.scrollHeight)"),
@@ -68,7 +72,7 @@ class WalmartSpider(scrapy.Spider):
             meta["playwright_context"] = {"storageState": str(storage_path)}
             self.logger.info("Loaded manual captcha session.")
 
-        yield scrapy.Request(url, meta=meta, callback=self.parse)
+        yield scrapy.Request(url, meta=meta, headers={"User-Agent": ua}, callback=self.parse)
 
     def parse(self, response):
         # `response.meta` may not exist in unit tests (Response not tied to a Request).
@@ -175,7 +179,12 @@ class WalmartSpider(scrapy.Spider):
             # if critical fields missing, follow the detail page to enrich
             if missing and link:
                 self.logger.info('Missing fields on list card — following detail for %s missing=%s', link, missing)
+
+                # pick UA for the detail request too (keeps fingerprints mixed)
+                detail_ua = random.choice(USER_AGENTS)
+
                 detail_methods = [
+                    PageMethod("set_extra_http_headers", {"user-agent": detail_ua}),
                     PageMethod("set_viewport_size", {"width": 1200, "height": 900}),
                     PageMethod("goto", link, {"wait_until": "domcontentloaded"}),
                     PageMethod("wait_for_selector", "body"),
@@ -189,7 +198,7 @@ class WalmartSpider(scrapy.Spider):
                     'incomplete': True,
                     'missing_fields': missing,
                 }
-                yield scrapy.Request(link, callback=self.parse_product_detail, meta={
+                yield scrapy.Request(link, callback=self.parse_product_detail, headers={"User-Agent": detail_ua}, meta={
                     'playwright': True,
                     'playwright_page_methods': detail_methods,
                     'partial_item': partial,
