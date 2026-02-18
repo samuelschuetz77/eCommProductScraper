@@ -271,8 +271,13 @@ def captcha_interactive():
                     price_el = el.query_selector('span.f3') or el.query_selector('span.price-characteristic')
                     price_text = price_el.inner_text().strip() if price_el else None
                     price = None
-                    if price_text:
-                        price = float(''.join(ch for ch in price_text if (ch.isdigit() or ch in '.')))
+                    try:
+                        # sanitize price string and fall back to 0.0 when parsing fails
+                        clean_price = ''.join(ch for ch in (price_text or '') if (ch.isdigit() or ch == '.'))
+                        price = float(clean_price) if clean_price else 0.0
+                    except (ValueError, TypeError):
+                        price = 0.0
+
                     image = el.query_selector('img')
                     image = image.get_attribute('src') if image else None
                     link_el = el.query_selector('a')
@@ -293,17 +298,12 @@ def captcha_interactive():
 
             browser.close()
 
-        # persist to DB
-        saved = _save_products_to_db(products, search_term=search_term)
-        resp = {'count': len(products), 'products': products, 'saved': saved}
-        # confirm storage state file exists and return its path to the caller
+        # persist to DB (best-effort)
         try:
-            if storage_path.exists():
-                resp['storage_state'] = str(storage_path)
+            saved = _save_products_to_db(products, search_term=search_term)
         except Exception:
-            logger.exception('Error checking storage_state file')
-
-        return jsonify(resp)
+            logger.exception('Error while saving products from interactive solve')
+            saved = []
 
     except Exception:
         logger.exception('Interactive captcha flow failed')
@@ -357,7 +357,22 @@ def scrape():
 
     try:
         with open(output_path, 'r', encoding='utf-8') as f:
-            products = json.load(f)
+            content = f.read()
+        try:
+            products = json.loads(content)
+        except json.JSONDecodeError:
+            # try to be forgiving: parse as JSON-lines (one JSON object per line)
+            products = []
+            for line in content.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    products.append(json.loads(line))
+                except Exception:
+                    logger.warning('Failed to parse a line from scrapy output (truncated): %s', line[:200])
+            logger.warning('Scrapy output JSON was malformed; parsed %d objects from lines', len(products))
+
         logger.info('Scrapy produced output %s -> %d products', output_path, len(products))
     except FileNotFoundError:
         return jsonify({'error': 'Scrape output missing'}), 500
