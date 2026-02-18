@@ -305,6 +305,17 @@ def captcha_interactive():
             logger.exception('Error while saving products from interactive solve')
             saved = []
 
+        # Build and return response (previously missing) so the client receives results
+        resp = {'count': len(products), 'products': products, 'saved': saved}
+        try:
+            if storage_path.exists():
+                resp['storage_state'] = str(storage_path)
+        except Exception:
+            logger.exception('Error checking storage_state file for interactive flow')
+
+        logger.info('Interactive captcha solved — returning %d products', len(products))
+        return jsonify(resp)
+
     except Exception:
         logger.exception('Interactive captcha flow failed')
         return jsonify({'error': 'Interactive captcha flow failed'}), 500
