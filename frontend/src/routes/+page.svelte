@@ -1,5 +1,4 @@
 <script>
-  import { onMount } from 'svelte';
   import { fade, fly, slide } from 'svelte/transition';
 
   let searchTerm = '';
@@ -11,11 +10,6 @@
   let manualSolve = false;
   let errorMsg = '';
 
-  // DOM refs used for auto-spacing
-  let panelEl;
-  let productsEl;
-  let spacer = 0; // pixels to add to products container when overlap detected
-  
   // Track which rows are expanded (by index)
   let expandedRows = new Set();
 
@@ -28,39 +22,8 @@
     expandedRows = expandedRows; // Trigger reactivity
   }
 
-  // --- Auto-spacer: keep products below the control panel ------------------
-  function updateSpacer() {
-    if (!panelEl || !productsEl) return;
-    const pRect = panelEl.getBoundingClientRect();
-    const tRect = productsEl.getBoundingClientRect();
+  /* Removed JS auto-spacer — using CSS sticky panel + responsive spacer instead */
 
-    // If the panel's bottom is below the top of the products area → possible overlap
-    const isOverlapping = pRect.bottom > (tRect.top - 8);
-    if (isOverlapping) {
-      const needed = Math.ceil(pRect.height + 12); // panel height + small buffer
-      spacer = needed;
-    } else {
-      spacer = 0;
-    }
-  }
-
-  onMount(() => {
-    // update immediately and on resize/scroll/resize of panel
-    updateSpacer();
-    const ro = new ResizeObserver(updateSpacer);
-    ro.observe(document.body);
-    if (panelEl) ro.observe(panelEl);
-
-    const onWin = () => updateSpacer();
-    window.addEventListener('resize', onWin, { passive: true });
-    window.addEventListener('scroll', onWin, { passive: true });
-
-    return () => {
-      ro.disconnect();
-      window.removeEventListener('resize', onWin);
-      window.removeEventListener('scroll', onWin);
-    };
-  });
   // ------------------------------------------------------------------------
 
   async function scrape() {
@@ -87,8 +50,7 @@
       if (data.error) throw new Error(data.error);
       products = data.products || data;
 
-      // After new content arrives, ensure spacer calculation is up-to-date
-      requestAnimationFrame(() => updateSpacer());
+      // content updated — spacing handled by CSS (sticky + responsive spacer)
     } catch (error) {
       console.error('Error:', error);
       errorMsg = error.message || 'Backend unreachable.';
@@ -111,7 +73,7 @@
     </div>
   </header>
 
-  <div bind:this={panelEl} class="w-full max-w-[450px] border-4 border-black bg-white shadow-[8px_8px_0px_0px_#020617] p-6 mb-24 relative z-10 box-border">
+  <div class="w-full max-w-[450px] border-4 border-black bg-white shadow-[8px_8px_0px_0px_#020617] p-6 mb-24 sticky top-6 z-20 box-border">
     
     <form on:submit|preventDefault={scrape} class="flex flex-col gap-5 w-full">
       
@@ -179,7 +141,10 @@
     </form>
   </div>
 
-  <div bind:this={productsEl} class="w-[90%] md:w-[80%] pb-20" style="margin-top: {spacer}px">
+  <!-- fixed responsive spacer so sticky panel never overlaps content -->
+  <div class="h-6 sm:h-32 md:h-64 lg:h-96" aria-hidden="true"></div>
+
+  <div class="w-[90%] md:w-[80%] pb-20 mt-6 sm:mt-32 md:mt-64 lg:mt-96">
     {#if errorMsg}
         <div class="p-4 border-2 border-red-600 bg-red-50 text-red-600 font-['JetBrains_Mono'] text-sm mb-8 text-center uppercase tracking-wide shadow-[4px_4px_0px_0px_#ef4444]">{errorMsg}</div>
     {/if}
