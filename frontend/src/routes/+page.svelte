@@ -141,14 +141,11 @@
     </form>
   </div>
 
-  <!-- fixed responsive spacer so sticky panel never overlaps content -->
-  <div class="h-6 sm:h-32 md:h-64 lg:h-96" aria-hidden="true"></div>
-  <!-- extra invisible divs requested by user (guarantee separation) -->
-  <div class="h-8 w-full flex-shrink-0" aria-hidden="true"></div>
-  <div class="h-8 w-full flex-shrink-0" aria-hidden="true"></div>
-  <div class="h-8 w-full flex-shrink-0" aria-hidden="true"></div>
+  
+  
 
-  <div class="w-[90%] md:w-[80%] pb-20 mt-6 sm:mt-32 md:mt-64 lg:mt-96">
+
+  <div class="w-[90%] md:w-[80%] pb-20 mt-6 sm:mt-24 md:mt-24 lg:mt-24">
     {#if errorMsg}
         <div class="p-4 border-2 border-red-600 bg-red-50 text-red-600 font-['JetBrains_Mono'] text-sm mb-8 text-center uppercase tracking-wide shadow-[4px_4px_0px_0px_#ef4444]">{errorMsg}</div>
     {/if}
