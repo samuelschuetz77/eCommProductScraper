@@ -242,7 +242,7 @@ class WalmartSpider(scrapy.Spider):
         price = None
         if price_txt:
                 price = self._parse_price(price_txt)
-            else:
+        else:
                 price = partial.get('price')
         hero = response.css('img.prod-hero-image::attr(src)').get() or response.css('img[itemprop="image"]::attr(src)').get()
         if hero:
