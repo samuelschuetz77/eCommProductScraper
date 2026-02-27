@@ -32,7 +32,7 @@ if (-not $OnlyBackend) {
     if (-not (Test-Path $frontendDir)) {
         Write-Host "Frontend directory not found at $frontendDir" -ForegroundColor Yellow
     }
-    Start-Process -FilePath 'npm' -ArgumentList 'run dev' -WorkingDirectory $frontendDir -WindowStyle Normal
+    Start-Process -FilePath 'powershell' -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"cd '$frontendDir'; npm run dev`"" -WorkingDirectory $frontendDir -WindowStyle Normal
 }
 
 Start-Sleep -Seconds 1
