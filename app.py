@@ -7,6 +7,7 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
+import requests
 import pandas as pd
 from flask import Flask, render_template, request, jsonify, send_file
 from flask_cors import CORS
@@ -18,7 +19,16 @@ from sqlalchemy.engine.url import make_url
 # --- app / logging ---------------------------------------------------------
 app = Flask(__name__, static_folder='frontend/build', template_folder='templates')
 CORS(app, resources={r"/*": {"origins": "*"}})  # safe for local/dev; restrict in prod
-logging.basicConfig(level=logging.INFO)
+LOG_DIR = Path("logs")
+LOG_DIR.mkdir(exist_ok=True)
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s %(levelname)s %(name)s :: %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(LOG_DIR / "scrape.log", encoding="utf-8"),
+    ],
+)
 logger = logging.getLogger(__name__)
 
 # --- database setup -------------------------------------------------------
@@ -69,13 +79,19 @@ def _unique_output_file():
     uid = uuid.uuid4().hex[:8]
     return WALMART_DIR / f"scraped_{ts}_{uid}.json"
 
+def _product_missing_fields(product):
+    required = ("name", "price", "image", "link")
+    return [field for field in required if not product.get(field)]
+
+def _product_is_valid(product):
+    return len(_product_missing_fields(product)) == 0
+
 def _save_products_to_db(products, search_term=None):
     """Save scraped products to DB and record image URLs (best-effort).
 
     Returns a list of dicts describing what was created/updated and any warnings.
     """
     saved = []
-    import requests
     total_products = len(products)
     logger.info('Saving %d products to DB (search_term=%s)', total_products, search_term)
 
@@ -86,7 +102,7 @@ def _save_products_to_db(products, search_term=None):
                 name = p.get('name')
                 price = p.get('price')
                 image = p.get('image')
-                images = p.get('images') or ([] if p.get('images') is None else p.get('images'))
+                images = p.get('images') or []
                 raw = json.dumps(p)
 
                 is_complete = 1 if (name and price is not None and (image or images) and link) else 0
@@ -356,50 +372,132 @@ def scrape():
     min_price = request.form.get('minPrice') or ''
     max_price = request.form.get('maxPrice') or ''
 
-    output_path = _unique_output_file()
-    output_name = output_path.name
+    scrape_run_id = f"run-{uuid.uuid4().hex[:10]}"
+    logger.info(
+        "Scrape request received run_id=%s search_term=%s target_count=%s min_price=%s max_price=%s",
+        scrape_run_id, search_term, num_products, min_price, max_price
+    )
 
-    scrapy_command = [
-        'python', '-m', 'scrapy', 'crawl', 'walmart',
-        '-a', f'search_term={search_term}',
-        '-a', f'min_price={min_price}',
-        '-a', f'max_price={max_price}',
-        '-a', f'num_products={num_products}',
-        '-o', output_name
-    ]
-
-    logger.info('Starting scrapy: %s', ' '.join(scrapy_command))
-
-    try:
-        subprocess.run(scrapy_command, check=True, cwd=str(WALMART_DIR), timeout=600)
-    except subprocess.TimeoutExpired as e:
-        logger.exception('Scrapy timed out')
-        return jsonify({'error': 'Scraping timed out'}), 504
-    except subprocess.CalledProcessError as e:
-        logger.exception('Scrapy failed')
-        return jsonify({'error': 'Scrapy failed', 'detail': str(e)}), 500
-
-    try:
-        with open(output_path, 'r', encoding='utf-8') as f:
+    def _load_scrapy_output(path):
+        with open(path, 'r', encoding='utf-8') as f:
             content = f.read()
         try:
-            products = json.loads(content)
+            return json.loads(content)
         except json.JSONDecodeError:
-            # try to be forgiving: parse as JSON-lines (one JSON object per line)
-            products = []
+            parsed = []
             for line in content.splitlines():
                 line = line.strip()
                 if not line:
                     continue
                 try:
-                    products.append(json.loads(line))
+                    parsed.append(json.loads(line))
                 except Exception:
-                    logger.warning('Failed to parse a line from scrapy output (truncated): %s', line[:200])
-            logger.warning('Scrapy output JSON was malformed; parsed %d objects from lines', len(products))
+                    logger.warning('run_id=%s failed to parse scrapy output line: %s', scrape_run_id, line[:200])
+            logger.warning('run_id=%s scrapy JSON malformed; parsed %d JSONL rows', scrape_run_id, len(parsed))
+            return parsed
 
-        logger.info('Scrapy produced output %s -> %d products', output_path, len(products))
-    except FileNotFoundError:
-        return jsonify({'error': 'Scrape output missing'}), 500
+    max_attempts = 3
+    attempt = 0
+    collected = []
+    seen_links = set()
+    while len(collected) < num_products and attempt < max_attempts:
+        attempt += 1
+        output_path = _unique_output_file()
+        output_name = output_path.name
+        remaining_target = num_products - len(collected)
+        max_pages = 8 + (attempt - 1) * 4
+
+        scrapy_command = [
+            'python', '-m', 'scrapy', 'crawl', 'walmart',
+            '-a', f'search_term={search_term}',
+            '-a', f'min_price={min_price}',
+            '-a', f'max_price={max_price}',
+            '-a', f'num_products={remaining_target}',
+            '-a', f'max_pages={max_pages}',
+            '-a', f'scrape_run_id={scrape_run_id}-a{attempt}',
+            '-o', output_name
+        ]
+        logger.info(
+            'run_id=%s attempt=%s starting scrapy cmd=%s',
+            scrape_run_id, attempt, ' '.join(scrapy_command)
+        )
+
+        started = time.time()
+        try:
+            proc = subprocess.run(
+                scrapy_command,
+                check=True,
+                cwd=str(WALMART_DIR),
+                timeout=600,
+                capture_output=True,
+                text=True,
+            )
+            elapsed = round(time.time() - started, 2)
+            stdout_tail = (proc.stdout or '')[-1500:]
+            stderr_tail = (proc.stderr or '')[-1500:]
+            logger.debug('run_id=%s attempt=%s scrapy stdout tail:\n%s', scrape_run_id, attempt, stdout_tail)
+            logger.debug('run_id=%s attempt=%s scrapy stderr tail:\n%s', scrape_run_id, attempt, stderr_tail)
+            logger.info('run_id=%s attempt=%s scrapy completed in %ss', scrape_run_id, attempt, elapsed)
+        except subprocess.TimeoutExpired:
+            logger.exception('run_id=%s attempt=%s scrapy timed out', scrape_run_id, attempt)
+            return jsonify({'error': 'Scraping timed out'}), 504
+        except subprocess.CalledProcessError as e:
+            logger.exception('run_id=%s attempt=%s scrapy failed', scrape_run_id, attempt)
+            return jsonify({'error': 'Scrapy failed', 'detail': (e.stderr or str(e))[-800:]}), 500
+
+        try:
+            products = _load_scrapy_output(output_path)
+        except FileNotFoundError:
+            logger.error('run_id=%s attempt=%s output missing at %s', scrape_run_id, attempt, output_path)
+            return jsonify({'error': 'Scrape output missing'}), 500
+
+        logger.info('run_id=%s attempt=%s parsed %s raw products', scrape_run_id, attempt, len(products))
+        for idx, product in enumerate(products, start=1):
+            missing = _product_missing_fields(product)
+            link = product.get('link')
+            logger.info(
+                'run_id=%s attempt=%s product_idx=%s field_status title=%s price=%s image=%s link=%s description=%s shipping=%s image_urls_count=%s missing=%s',
+                scrape_run_id,
+                attempt,
+                idx,
+                bool(product.get('name')),
+                bool(product.get('price') is not None),
+                bool(product.get('image')),
+                bool(link),
+                bool(product.get('description')),
+                bool(product.get('shipping')),
+                len(product.get('images') or []),
+                missing,
+            )
+            if link and link in seen_links:
+                logger.debug('run_id=%s attempt=%s duplicate product skipped link=%s', scrape_run_id, attempt, link)
+                continue
+            if not _product_is_valid(product):
+                logger.warning(
+                    'run_id=%s attempt=%s rejected product idx=%s missing=%s link=%s',
+                    scrape_run_id, attempt, idx, missing, link
+                )
+                continue
+            if link:
+                seen_links.add(link)
+            collected.append(product)
+            logger.info(
+                'run_id=%s attempt=%s accepted product idx=%s collected=%s/%s link=%s',
+                scrape_run_id, attempt, idx, len(collected), num_products, link
+            )
+            if len(collected) >= num_products:
+                break
+
+        logger.info(
+            'run_id=%s attempt=%s complete; collected=%s/%s',
+            scrape_run_id, attempt, len(collected), num_products
+        )
+
+    products = collected[:num_products]
+    logger.info(
+        'run_id=%s scrape finished collected=%s requested=%s attempts=%s shortfall=%s',
+        scrape_run_id, len(products), num_products, attempt, max(0, num_products - len(products))
+    )
 
     # If nothing scraped, optionally save the full page HTML + screenshot for debugging
     debug_html_path = None
@@ -433,22 +531,15 @@ def scrape():
     # persist to DB (best-effort)
     saved = _save_products_to_db(products, search_term=search_term)
 
-    resp = {'count': len(products), 'products': products, 'saved': saved}
+    resp = {'count': len(products), 'products': products, 'saved': saved, 'run_id': scrape_run_id, 'requested_count': num_products}
     if debug_html_path:
         resp['debug_html'] = str(debug_html_path)
     if debug_screenshot_path:
         resp['debug_screenshot'] = str(debug_screenshot_path)
     if captcha_detected:
         resp['captcha_detected'] = True
-
-    return jsonify(resp)
-
-    # persist to DB (best-effort)
-    saved = _save_products_to_db(products, search_term=search_term)
-
-    resp = {'count': len(products), 'products': products, 'saved': saved}
-    if debug_html_path:
-        resp['debug_html'] = str(debug_html_path)
+    if len(products) < num_products:
+        resp['shortfall'] = num_products - len(products)
 
     return jsonify(resp)
 

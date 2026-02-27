@@ -177,13 +177,15 @@
                         <td class="p-4 align-top border-r border-black/10">
                             <h3 class="font-black text-base md:text-xl uppercase leading-none mb-3 line-clamp-2">{product.name || 'UNKNOWN ITEM'}</h3>
                             
-                            <a href={product.link} target="_blank" class="text-[10px] md:text-xs text-blue-700 font-mono break-all opacity-70 hover:opacity-100 hover:underline decoration-2 mb-4 block">
-                                {product.link || '#'}
+                            <a href={product.link || '#'} target="_blank" rel="noopener noreferrer" class="text-[10px] md:text-xs text-blue-700 font-mono opacity-70 hover:opacity-100 hover:underline decoration-2 mb-4 inline-block">
+                                product page
                             </a>
                             
                             {#if expandedRows.has(i)}
                                 <div transition:slide class="mt-4 p-4 bg-gray-50 border-2 border-black font-['JetBrains_Mono'] text-xs shadow-[4px_4px_0px_0px_rgba(0,0,0,0.1)]">
                                     <p class="mb-2"><span class="bg-black text-white px-1 mr-2">DESC</span>{product.description || 'No extended description found.'}</p>
+                                    <p class="mb-2"><span class="bg-black text-white px-1 mr-2">SHIP</span>{product.shipping || 'Not captured'}</p>
+                                    <p class="mb-2"><span class="bg-black text-white px-1 mr-2">IMAGES</span>{(product.images && product.images.length) || (product.image ? 1 : 0)}</p>
                                     <p><span class="bg-black text-white px-1 mr-2">SOURCE</span>{product.source || 'DOM_SCAN'}</p>
                                 </div>
                             {/if}

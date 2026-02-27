@@ -12,7 +12,7 @@ backend:
 	@powershell -ExecutionPolicy Bypass -File scripts\dev.ps1 -OnlyBackend
 
 frontend:
-	@powershell -NoProfile -ExecutionPolicy Bypass -Command "Try { Start-Process -FilePath 'powershell' -ArgumentList '-NoProfile -ExecutionPolicy Bypass -Command \"cd \"' + (Resolve-Path frontend).Path + ' ; npm run dev\"' -WorkingDirectory (Resolve-Path frontend).Path -WindowStyle Normal -ErrorAction Stop } Catch { Write-Host 'fallback: running npm --prefix frontend run dev (foreground)'; npm --prefix frontend run dev }"
+	@powershell -ExecutionPolicy Bypass -File scripts\dev.ps1 -OnlyFrontend
 
 test:
 	.venv\Scripts\python.exe -m pytest -q
