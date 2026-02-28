@@ -4,6 +4,7 @@ import json
 import time
 import uuid
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -237,6 +238,7 @@ def captcha_interactive():
     search_url = f"https://www.walmart.com/search?q={search_term}"
     products = []
     storage_path = WALMART_DIR / 'walmart_storage.json'
+    scrape_run_id = f"interactive-{uuid.uuid4().hex[:8]}"
 
     try:
         from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
@@ -276,25 +278,671 @@ def captcha_interactive():
                 return jsonify({'error': 'Timed out waiting for product grid'}), 504
 
             elems = page.query_selector_all('div[data-item-id]') or page.query_selector_all('div.search-result-gridview-item-wrapper')
-            logger.info('Found %d product candidate elements', len(elems))
+            logger.info('Found %d product candidate elements (run_id=%s)', len(elems), scrape_run_id)
+            try:
+                page_marker_script = """
+                () => {
+                    const phrases = ['about this item', 'product details', 'view all item details'];
+                    const out = [];
+                    const nodes = document.querySelectorAll('body *');
+                    for (const node of nodes) {
+                        const text = (node.textContent || '').replace(/\\s+/g, ' ').trim();
+                        if (!text) continue;
+                        const low = text.toLowerCase();
+                        let matched = null;
+                        for (const p of phrases) {
+                            if (low.includes(p)) {
+                                matched = p;
+                                break;
+                            }
+                        }
+                        if (!matched) continue;
+                        out.push({
+                            phrase: matched,
+                            tag: (node.tagName || '').toLowerCase(),
+                            cls: node.className || '',
+                            aria: node.getAttribute('aria-label') || '',
+                            txt: text.slice(0, 220),
+                            html: (node.outerHTML || '').replace(/\\s+/g, ' ').slice(0, 260),
+                        });
+                        if (out.length >= 25) break;
+                    }
+                    return out;
+                }
+                """
+                page_markers = page.evaluate(page_marker_script) or []
+                logger.info(
+                    'Interactive page markers run_id=%s marker_count=%d',
+                    scrape_run_id,
+                    len(page_markers),
+                )
+                for pidx, pm in enumerate(page_markers, start=1):
+                    logger.debug(
+                        'Interactive page marker run_id=%s marker=%d phrase=%s tag=%s class=%s aria=%s text="%s" html="%s"',
+                        scrape_run_id,
+                        pidx,
+                        pm.get('phrase'),
+                        pm.get('tag'),
+                        pm.get('cls'),
+                        pm.get('aria'),
+                        (pm.get('txt') or '')[:180],
+                        (pm.get('html') or '')[:220],
+                    )
+            except Exception as page_marker_err:
+                logger.debug('Interactive page marker capture failed run_id=%s error=%s', scrape_run_id, page_marker_err)
+
+            def _normalize_product_link(raw_link):
+                if not raw_link:
+                    return None
+                link = raw_link.strip()
+                if link.startswith('/'):
+                    link = f"https://www.walmart.com{link}"
+                # Sponsored cards often use /sp/track with rd=<real product url>.
+                try:
+                    from urllib.parse import urlparse, parse_qs, unquote
+                    parsed = urlparse(link)
+                    if '/sp/track' in parsed.path:
+                        qs = parse_qs(parsed.query)
+                        rd = qs.get('rd', [None])[0]
+                        if rd:
+                            resolved = unquote(rd)
+                            if resolved.startswith('/'):
+                                resolved = f"https://www.walmart.com{resolved}"
+                            if resolved.startswith('http'):
+                                logger.debug('Resolved sponsored link -> product link run_id=%s track=%s resolved=%s', scrape_run_id, link, resolved)
+                                return resolved
+                        # Some tracking links include a raw /ip/... suffix without rd param.
+                        m = re.search(r'(/ip/[^\s\?&#]+[^\s]*)', unquote(link))
+                        if m:
+                            candidate = m.group(1)
+                            if candidate.startswith('/'):
+                                candidate = f"https://www.walmart.com{candidate}"
+                            logger.debug('Resolved sponsored link by /ip suffix run_id=%s track=%s resolved=%s', scrape_run_id, link, candidate)
+                            return candidate
+                except Exception as e:
+                    logger.debug('Link normalization failed run_id=%s link=%s error=%s', scrape_run_id, link, e)
+                return link
+
+            def _parse_price_value(text):
+                if not text:
+                    return None
+                s = str(text).replace('\xa0', ' ').strip()
+                # Highest priority: discounted labels (Now/Clearance/Reduced/Sale)
+                labeled_decimal = re.search(
+                    r"(?:now|clearance|reduced(?:\s+from)?|sale(?:\s+price)?)\s*\$?\s*([0-9][0-9,]*\.[0-9]{2})",
+                    s,
+                    flags=re.IGNORECASE,
+                )
+                if labeled_decimal:
+                    try:
+                        return float(labeled_decimal.group(1).replace(',', ''))
+                    except Exception:
+                        return None
+
+                labeled_compact = re.search(
+                    r"(?:now|clearance|reduced(?:\s+from)?|sale(?:\s+price)?)\s*\$?\s*([0-9][0-9,]{2,})",
+                    s,
+                    flags=re.IGNORECASE,
+                )
+                if labeled_compact:
+                    try:
+                        raw = labeled_compact.group(1).replace(',', '')
+                        return float(raw) / 100.0 if len(raw) >= 3 else float(raw)
+                    except Exception:
+                        return None
+
+                # Walmart often includes "current price $10.29" in the same node.
+                current_price_match = re.search(r"current\s+price\s*\$?\s*([0-9][0-9,]*\.[0-9]{2})", s, flags=re.IGNORECASE)
+                if current_price_match:
+                    try:
+                        return float(current_price_match.group(1).replace(',', ''))
+                    except Exception:
+                        return None
+
+                # Prefer explicit decimal currency matches.
+                decimal_currency = re.findall(r"\$\s*([0-9][0-9,]*\.[0-9]{1,2})", s)
+                if decimal_currency:
+                    try:
+                        return float(decimal_currency[-1].replace(',', ''))
+                    except Exception:
+                        return None
+
+                # Fallback for any decimal number in text.
+                m2 = re.search(r"\b([0-9][0-9,]*\.[0-9]{2})\b", s)
+                if m2:
+                    try:
+                        return float(m2.group(1).replace(',', ''))
+                    except Exception:
+                        return None
+
+                # Last resort: integer-looking currency amount (e.g. "$1029").
+                # If "current price" exists in the same text, this value is usually cents.
+                compact_currency = re.findall(r"\$\s*([0-9][0-9,]*)", s)
+                if compact_currency:
+                    num = compact_currency[-1].replace(',', '')
+                    try:
+                        if re.search(r"current\s+price", s, flags=re.IGNORECASE) and len(num) >= 3:
+                            return float(num) / 100.0
+                        return float(num)
+                    except Exception:
+                        return None
+                return None
+
+            def _clean_title_text(raw_title, item_idx):
+                """Normalize title and remove embedded pricing noise from card text."""
+                raw = (raw_title or '').replace('\xa0', ' ').strip()
+                if not raw:
+                    logger.debug('Interactive title clean item=%d success=False reason=empty_raw run_id=%s', item_idx, scrape_run_id)
+                    return 'Unknown Item'
+
+                lines = [re.sub(r'\s+', ' ', ln).strip() for ln in raw.splitlines()]
+                lines = [ln for ln in lines if ln]
+
+                def _looks_like_price_line(s):
+                    low = s.lower()
+                    if re.search(r'\$\s*[0-9]', s):
+                        return True
+                    if re.search(r'\bcurrent\s+price\b|\bwas\s+\$|\bnow\s+\$|\bclearance\b|\bsale\b', low):
+                        return True
+                    if re.search(r'^\+?\$[0-9]+(?:\.[0-9]{2})?\s+shipping$', low):
+                        return True
+                    if re.search(r'^[0-9]+(?:\.[0-9]{2})?\s*/\s*ea$', low):
+                        return True
+                    return False
+
+                # Prefer the first meaningful non-price line from multiline title blocks.
+                candidate = ''
+                for ln in lines:
+                    if len(ln) < 3:
+                        continue
+                    if _looks_like_price_line(ln):
+                        continue
+                    candidate = ln
+                    break
+                if not candidate:
+                    candidate = lines[0] if lines else raw
+
+                # Remove trailing price fragments still attached to the same line.
+                candidate = re.sub(r'\s+\$[0-9][0-9,]*(?:\.[0-9]{2})?(?:\s*/\s*ea)?\s*$', '', candidate)
+                candidate = re.sub(r'\s+(?:current\s+price|now|was|clearance|sale)\s+\$[0-9][0-9,]*(?:\.[0-9]{2})?\s*$', '', candidate, flags=re.IGNORECASE)
+                candidate = re.sub(r'\s+', ' ', candidate).strip(' -\t\r\n')
+
+                # Last-ditch protection: if candidate is still mostly price-y, use raw first token line.
+                if _looks_like_price_line(candidate):
+                    fallback = re.sub(r'\s+', ' ', (lines[0] if lines else raw)).strip()
+                    candidate = re.sub(r'\s+\$[0-9][0-9,]*(?:\.[0-9]{2})?.*$', '', fallback).strip()
+
+                cleaned = candidate or 'Unknown Item'
+                logger.debug(
+                    'Interactive title clean item=%d raw="%s" cleaned="%s" changed=%s run_id=%s',
+                    item_idx, raw[:180], cleaned[:180], raw[:180] != cleaned[:180], scrape_run_id
+                )
+                return cleaned
+
+            def _extract_quick_description(card_el, item_idx, product_name):
+                """Fast card-only description extraction. Avoids detail-page navigation."""
+                def _log_description_markers():
+                    marker_script = """
+                    (el) => {
+                        const phrases = ['about this item', 'product details', 'view all item details'];
+                        const results = [];
+                        const nodes = el.querySelectorAll('*');
+                        for (const node of nodes) {
+                            const text = (node.textContent || '').replace(/\\s+/g, ' ').trim();
+                            if (!text) continue;
+                            const low = text.toLowerCase();
+                            let matched = null;
+                            for (const p of phrases) {
+                                if (low.includes(p)) {
+                                    matched = p;
+                                    break;
+                                }
+                            }
+                            if (!matched) continue;
+                            results.push({
+                                phrase: matched,
+                                tag: (node.tagName || '').toLowerCase(),
+                                cls: node.className || '',
+                                aria: node.getAttribute('aria-label') || '',
+                                txt: text.slice(0, 240),
+                                html: (node.outerHTML || '').replace(/\\s+/g, ' ').slice(0, 280),
+                            });
+                            if (results.length >= 18) break;
+                        }
+                        const dangerous = [];
+                        const dh = el.querySelectorAll('div.dangerous-html');
+                        for (const d of dh) {
+                            const t = (d.textContent || '').replace(/\\s+/g, ' ').trim();
+                            dangerous.push(t.slice(0, 280));
+                            if (dangerous.length >= 4) break;
+                        }
+                        return {
+                            matches: results,
+                            dangerous_count: dh.length,
+                            dangerous_samples: dangerous,
+                        };
+                    }
+                    """
+                    try:
+                        marker_data = card_el.evaluate(marker_script)
+                        logger.debug(
+                            'Interactive description markers item=%d run_id=%s matches=%d dangerous_html_count=%d samples=%s',
+                            item_idx,
+                            scrape_run_id,
+                            len(marker_data.get('matches') or []),
+                            marker_data.get('dangerous_count', 0),
+                            marker_data.get('dangerous_samples') or [],
+                        )
+                        for marker_idx, m in enumerate((marker_data.get('matches') or []), start=1):
+                            logger.debug(
+                                'Interactive description marker item=%d marker=%d phrase=%s tag=%s class=%s aria=%s text="%s" html="%s" run_id=%s',
+                                item_idx,
+                                marker_idx,
+                                m.get('phrase'),
+                                m.get('tag'),
+                                m.get('cls'),
+                                m.get('aria'),
+                                (m.get('txt') or '')[:180],
+                                (m.get('html') or '')[:220],
+                                scrape_run_id,
+                            )
+                    except Exception as marker_err:
+                        logger.debug(
+                            'Interactive description markers item=%d success=False error=%s run_id=%s',
+                            item_idx,
+                            marker_err,
+                            scrape_run_id,
+                        )
+
+                _log_description_markers()
+
+                # Expand inline "Product details" sections when present.
+                expand_selectors = [
+                    'button[aria-label="Product details"]',
+                    'button[aria-label*="details"]',
+                    'button[data-dca-id][aria-label="Product details"]',
+                    'button:has-text("View all item details")',
+                    'button:has-text("About this item")',
+                ]
+
+                selectors = [
+                    'div.dangerous-html',
+                    'div.dangerous-html.mb3',
+                    'div[data-testid="product-details"]',
+                    'div[data-automation-id="product-details"]',
+                    'div.search-result-productdescription',
+                    'div.prod-ProductCard-description',
+                    '[data-automation-id="product-abstract"]',
+                    '[data-testid="product-description"]',
+                    'div[class*="line-clamp"]',
+                ]
+                max_rounds = 10
+                selector_attempt = 0
+                for round_no in range(1, max_rounds + 1):
+                    for expand_idx, expand_sel in enumerate(expand_selectors, start=1):
+                        try:
+                            btn = card_el.query_selector(expand_sel)
+                            if not btn:
+                                logger.debug(
+                                    'Interactive quick description round=%d expand=%d item=%d selector=%s success=False reason=no_button run_id=%s',
+                                    round_no, expand_idx, item_idx, expand_sel, scrape_run_id
+                                )
+                                continue
+                            expanded_state = (btn.get_attribute('aria-expanded') or '').strip().lower()
+                            if expanded_state == 'true':
+                                logger.debug(
+                                    'Interactive quick description round=%d expand=%d item=%d selector=%s success=True reason=already_expanded run_id=%s',
+                                    round_no, expand_idx, item_idx, expand_sel, scrape_run_id
+                                )
+                            else:
+                                btn.click(timeout=700)
+                                logger.info(
+                                    'Interactive quick description round=%d expand=%d item=%d selector=%s success=True run_id=%s',
+                                    round_no, expand_idx, item_idx, expand_sel, scrape_run_id
+                                )
+                        except Exception as e:
+                            logger.debug(
+                                'Interactive quick description round=%d expand=%d item=%d selector=%s success=False error=%s run_id=%s',
+                                round_no, expand_idx, item_idx, expand_sel, e, scrape_run_id
+                            )
+
+                    for selector in selectors:
+                        selector_attempt += 1
+                        try:
+                            node = card_el.query_selector(selector)
+                            txt = (node.inner_text() or '').strip() if node else ''
+                            if txt:
+                                txt = re.sub(r'\s+', ' ', txt).strip()
+                                # remove duplicated section heading prefix
+                                txt = re.sub(r'^\s*product details\s*[:\-]?\s*', '', txt, flags=re.IGNORECASE)
+                            # reject title-only / near-title strings
+                            name_norm = re.sub(r'\s+', ' ', (product_name or '').strip()).lower()
+                            txt_norm = (txt or '').lower()
+                            too_similar_to_title = bool(name_norm and (txt_norm == name_norm or txt_norm.startswith(name_norm)) and len(txt_norm) <= len(name_norm) + 18)
+
+                            if txt and len(txt) >= 40 and not too_similar_to_title:
+                                clean = re.sub(r'\s+', ' ', txt).strip()
+                                logger.info(
+                                    'Interactive quick description extracted item=%d round=%d attempt=%d selector=%s chars=%d run_id=%s',
+                                    item_idx, round_no, selector_attempt, selector, len(clean), scrape_run_id
+                                )
+                                return clean, f'card:{selector}'
+                            logger.debug(
+                                'Interactive quick description round=%d attempt=%d item=%d selector=%s success=False run_id=%s',
+                                round_no, selector_attempt, item_idx, selector, scrape_run_id
+                            )
+                        except Exception as e:
+                            logger.debug(
+                                'Interactive quick description round=%d attempt=%d item=%d selector=%s error=%s run_id=%s',
+                                round_no, selector_attempt, item_idx, selector, e, scrape_run_id
+                            )
+                    try:
+                        card_el.evaluate("(n) => n && n.scrollIntoView({block:'center', inline:'nearest'})")
+                    except Exception:
+                        pass
+                    try:
+                        page.wait_for_timeout(75)
+                    except Exception:
+                        pass
+
+                # Fallback: derive a clean sentence from card text without title/price noise.
+                try:
+                    raw = (card_el.inner_text() or '').strip()
+                    lines = [re.sub(r'\s+', ' ', ln).strip() for ln in raw.splitlines()]
+                    filtered = []
+                    name_norm = (product_name or '').strip().lower()
+                    for ln in lines:
+                        low = ln.lower()
+                        if not ln or len(ln) < 12:
+                            continue
+                        if name_norm and low == name_norm:
+                            continue
+                        if '$' in ln or 'current price' in low or 'options from' in low or 'shipping' in low:
+                            continue
+                        if 'pickup' in low or 'delivery' in low or 'add to cart' in low:
+                            continue
+                        filtered.append(ln)
+                    if filtered:
+                        joined = ' '.join(filtered[:2]).strip()
+                        if len(joined) >= 24:
+                            logger.info(
+                                'Interactive quick description extracted item=%d source=card_text_fallback chars=%d run_id=%s',
+                                item_idx, len(joined), scrape_run_id
+                            )
+                            return joined, 'card:card_text_fallback'
+                except Exception as e:
+                    logger.debug('Interactive quick description card_text fallback failed item=%d error=%s run_id=%s', item_idx, e, scrape_run_id)
+
+                logger.warning('Interactive quick description not found item=%d run_id=%s', item_idx, scrape_run_id)
+                return None, None
+
+            def _extract_key_item_features(context_obj, product_link, item_idx):
+                """Target Walmart PDP 'Key Item Features' section via fast HTTP fetch in same session."""
+                if not product_link:
+                    logger.debug(
+                        'Interactive key-features item=%d success=False reason=no_link run_id=%s',
+                        item_idx, scrape_run_id
+                    )
+                    return None, None
+
+                attempt_errors = []
+                html = ''
+                for fetch_attempt in range(1, 4):
+                    try:
+                        resp = context_obj.request.get(product_link, timeout=7000)
+                        status = resp.status
+                        html = resp.text() if status < 500 else ''
+                        logger.debug(
+                            'Interactive key-features fetch item=%d attempt=%d status=%s bytes=%d run_id=%s',
+                            item_idx, fetch_attempt, status, len(html or ''), scrape_run_id
+                        )
+                        if status in (200, 201) and html:
+                            break
+                    except Exception as fetch_err:
+                        attempt_errors.append(str(fetch_err))
+                        logger.debug(
+                            'Interactive key-features fetch item=%d attempt=%d success=False error=%s run_id=%s',
+                            item_idx, fetch_attempt, fetch_err, scrape_run_id
+                        )
+
+                if not html:
+                    logger.warning(
+                        'Interactive key-features item=%d success=False reason=empty_html errors=%s run_id=%s',
+                        item_idx, attempt_errors[:2], scrape_run_id
+                    )
+                    return None, None
+
+                # Diagnostics to understand misses across Walmart layout variants.
+                try:
+                    heading_hits = re.findall(r'Key\s*Item\s*Features', html, flags=re.IGNORECASE)
+                    li_hits = re.findall(r'<li\b', html, flags=re.IGNORECASE)
+                    ph3_hits = re.findall(r'class="[^"]*\bph3\b[^"]*"', html, flags=re.IGNORECASE)
+                    view_all_hits = re.findall(r'View all item details', html, flags=re.IGNORECASE)
+                    ai_hits = re.findall(r'Generated by AI', html, flags=re.IGNORECASE)
+                    logger.debug(
+                        'Interactive key-features diagnostics item=%d run_id=%s heading_hits=%d li_hits=%d ph3_hits=%d view_all_hits=%d ai_hits=%d html_bytes=%d',
+                        item_idx,
+                        scrape_run_id,
+                        len(heading_hits),
+                        len(li_hits),
+                        len(ph3_hits),
+                        len(view_all_hits),
+                        len(ai_hits),
+                        len(html),
+                    )
+                    hm = re.search(r'Key\s*Item\s*Features', html, flags=re.IGNORECASE)
+                    if hm:
+                        ctx = html[max(0, hm.start() - 220): min(len(html), hm.start() + 320)]
+                        ctx = re.sub(r'\s+', ' ', ctx).strip()
+                        logger.debug(
+                            'Interactive key-features heading context item=%d run_id=%s snippet="%s"',
+                            item_idx, scrape_run_id, ctx[:280]
+                        )
+                except Exception as diag_err:
+                    logger.debug(
+                        'Interactive key-features diagnostics item=%d success=False error=%s run_id=%s',
+                        item_idx, diag_err, scrape_run_id
+                    )
+
+                def _clean_li_text(li_html):
+                    txt = re.sub(r'<[^>]+>', ' ', li_html)
+                    txt = re.sub(r'&nbsp;|&#160;', ' ', txt, flags=re.IGNORECASE)
+                    txt = re.sub(r'&amp;', '&', txt)
+                    txt = re.sub(r'&quot;|&#34;', '"', txt)
+                    txt = re.sub(r'&#39;|&apos;', "'", txt)
+                    txt = re.sub(r'\s+', ' ', txt).strip()
+                    return txt
+
+                def _format_feature_list(raw_items):
+                    cleaned = []
+                    seen = set()
+                    for li in raw_items:
+                        txt = _clean_li_text(li)
+                        if not txt or len(txt) < 4:
+                            continue
+                        low = txt.lower()
+                        if low in seen:
+                            continue
+                        seen.add(low)
+                        cleaned.append(txt)
+                        if len(cleaned) >= 8:
+                            break
+                    if not cleaned:
+                        return None
+                    return '; '.join(cleaned[:6]), len(cleaned)
+
+                # Try 1: explicit "ph3 -> ul/li" structure (like user-provided snippet).
+                try:
+                    ph3_blocks = re.findall(
+                        r'<div[^>]*class="[^"]*\bph3\b[^"]*"[^>]*>(.*?)</div>',
+                        html,
+                        flags=re.IGNORECASE | re.DOTALL,
+                    )
+                    for bidx, block in enumerate(ph3_blocks, start=1):
+                        lis = re.findall(r'<li[^>]*>(.*?)</li>', block, flags=re.IGNORECASE | re.DOTALL)
+                        if not lis:
+                            continue
+                        formatted = _format_feature_list(lis)
+                        if formatted:
+                            text, count = formatted
+                            logger.info(
+                                'Interactive key-features extracted item=%d source=ph3_ul_li block=%d count=%d chars=%d run_id=%s',
+                                item_idx, bidx, count, len(text), scrape_run_id
+                            )
+                            return text, 'pdp:key_item_features_ph3'
+                    logger.debug(
+                        'Interactive key-features item=%d source=ph3_ul_li success=False run_id=%s',
+                        item_idx, scrape_run_id
+                    )
+                except Exception as parse_err:
+                    logger.debug(
+                        'Interactive key-features item=%d source=ph3_ul_li success=False error=%s run_id=%s',
+                        item_idx, parse_err, scrape_run_id
+                    )
+
+                # Try 2: explicit heading + nearby list items (both before/after heading).
+                try:
+                    m = re.search(r'Key\s*Item\s*Features', html, flags=re.IGNORECASE)
+                    if m:
+                        start = max(0, m.start() - 14000)
+                        end = min(len(html), m.start() + 14000)
+                        window = html[start:end]
+                        lis = re.findall(r'<li[^>]*>(.*?)</li>', window, flags=re.IGNORECASE | re.DOTALL)
+                        formatted = _format_feature_list(lis)
+                        if formatted:
+                            text, count = formatted
+                            logger.info(
+                                'Interactive key-features extracted item=%d source=heading_window_li count=%d chars=%d run_id=%s',
+                                item_idx, count, len(text), scrape_run_id
+                            )
+                            return text, 'pdp:key_item_features'
+                        logger.debug(
+                            'Interactive key-features item=%d source=heading_window_li success=False reason=no_li_near_heading run_id=%s',
+                            item_idx, scrape_run_id
+                        )
+                    else:
+                        logger.debug(
+                            'Interactive key-features item=%d source=heading_li success=False reason=no_heading run_id=%s',
+                            item_idx, scrape_run_id
+                        )
+                except Exception as parse_err:
+                    logger.debug(
+                        'Interactive key-features item=%d source=heading_li success=False error=%s run_id=%s',
+                        item_idx, parse_err, scrape_run_id
+                    )
+
+                # Try 3: JSON-like keyItemFeatures arrays embedded in scripts.
+                try:
+                    jm = re.search(
+                        r'"keyItemFeatures"\s*:\s*\[(.*?)\]',
+                        html,
+                        flags=re.IGNORECASE | re.DOTALL
+                    )
+                    if jm:
+                        raw_block = jm.group(1)
+                        quoted = re.findall(r'"([^"\\\\]*(?:\\\\.[^"\\\\]*)*)"', raw_block)
+                        clean_items = []
+                        for q in quoted:
+                            txt = q.encode('utf-8').decode('unicode_escape', errors='ignore')
+                            txt = re.sub(r'\s+', ' ', txt).strip()
+                            if txt and len(txt) >= 4:
+                                clean_items.append(txt)
+                            if len(clean_items) >= 8:
+                                break
+                        if clean_items:
+                            text = '; '.join(clean_items[:6])
+                            logger.info(
+                                'Interactive key-features extracted item=%d source=json_keyItemFeatures count=%d chars=%d run_id=%s',
+                                item_idx, len(clean_items), len(text), scrape_run_id
+                            )
+                            return text, 'pdp:key_item_features_json'
+                    logger.debug(
+                        'Interactive key-features item=%d source=json_keyItemFeatures success=False run_id=%s',
+                        item_idx, scrape_run_id
+                    )
+                except Exception as parse_err:
+                    logger.debug(
+                        'Interactive key-features item=%d source=json_keyItemFeatures success=False error=%s run_id=%s',
+                        item_idx, parse_err, scrape_run_id
+                    )
+
+                logger.warning(
+                    'Interactive key-features item=%d success=False reason=not_found run_id=%s',
+                    item_idx, scrape_run_id
+                )
+                return None, None
 
             for i, el in enumerate(elems[:num_products]):
                 try:
                     # TITLE: multiple fallbacks
                     name_el = el.query_selector('span.normal') or el.query_selector('span[data-automation-id="product-title"]') or el.query_selector('a > span') or el.query_selector('h2')
-                    name = name_el.inner_text().strip() if name_el else 'Unknown Item'
+                    raw_name = name_el.inner_text().strip() if name_el else 'Unknown Item'
+                    name = _clean_title_text(raw_name, i)
 
-                    # PRICE: broadened selectors + debug logging
-                    price_el = el.query_selector('div[data-automation-id="product-price"] span') or el.query_selector('span.f2') or el.query_selector('span.w_iUH7') or el.query_selector('span.price-characteristic')
-                    raw_price_text = price_el.inner_text().strip() if price_el else ''
-                    logger.debug('Interactive parse - item %d raw price: "%s"', i, raw_price_text)
-
-                    # sanitize price
+                    # PRICE: multi-selector attempts + full-card regex fallback
+                    raw_price_text = ''
+                    price = None
                     try:
-                        clean_text = ''.join(ch for ch in raw_price_text if (ch.isdigit() or ch == '.'))
-                        price = float(clean_text) if clean_text else 0.0
-                    except Exception:
-                        price = 0.0
+                        # Walmart often splits dollars/cents; combine explicitly first.
+                        dollars_el = el.query_selector('span.price-characteristic')
+                        cents_el = el.query_selector('span.price-mantissa')
+                        if dollars_el:
+                            dollars = (dollars_el.get_attribute('content') or dollars_el.inner_text() or '').strip()
+                            cents = (cents_el.get_attribute('content') or cents_el.inner_text() or '').strip() if cents_el else ''
+                            dollars_digits = re.sub(r'[^0-9]', '', dollars)
+                            cents_digits = re.sub(r'[^0-9]', '', cents)
+                            if dollars_digits:
+                                if cents_digits:
+                                    cents_digits = cents_digits[:2].ljust(2, '0')
+                                    price = float(f"{int(dollars_digits)}.{cents_digits}")
+                                    raw_price_text = f"${int(dollars_digits)}.{cents_digits}"
+                                else:
+                                    price = float(int(dollars_digits))
+                                    raw_price_text = f"${int(dollars_digits)}"
+                                logger.debug(
+                                    'Interactive price split parse item=%d success=True dollars=%s cents=%s price=%s',
+                                    i, dollars_digits, cents_digits, price
+                                )
+                    except Exception as split_err:
+                        logger.debug('Interactive price split parse item=%d success=False error=%s', i, split_err)
+
+                    price_attempts = [
+                        ('div[data-automation-id="product-price"]', 'inner_text'),
+                        ('div[data-automation-id="product-price"] span', 'inner_text'),
+                        ('span.price-characteristic', 'attr_content'),
+                        ('span[data-automation-id="product-price"]', 'inner_text'),
+                        ('[itemprop="price"]', 'attr_content'),
+                        ('span[class*="price"]', 'inner_text'),
+                    ]
+                    for attempt_no, (selector, mode) in enumerate(price_attempts, start=1):
+                        if price is not None:
+                            break
+                        try:
+                            node = el.query_selector(selector)
+                            if not node:
+                                logger.debug('Interactive price attempt %d item=%d selector=%s success=False reason=no_node', attempt_no, i, selector)
+                                continue
+                            candidate = (node.get_attribute('content') if mode == 'attr_content' else node.inner_text()) or ''
+                            candidate = candidate.strip()
+                            candidate_price = _parse_price_value(candidate)
+                            logger.debug(
+                                'Interactive price attempt %d item=%d selector=%s raw="%s" success=%s',
+                                attempt_no, i, selector, candidate[:120], bool(candidate_price is not None)
+                            )
+                            if candidate_price is not None:
+                                raw_price_text = candidate
+                                price = candidate_price
+                                break
+                        except Exception as attempt_err:
+                            logger.debug('Interactive price attempt %d item=%d selector=%s success=False error=%s', attempt_no, i, selector, attempt_err)
+
+                    if price is None:
+                        card_text = (el.inner_text() or '').strip()
+                        price = _parse_price_value(card_text)
+                        raw_price_text = card_text[:160]
+                        logger.debug('Interactive price fallback item=%d source=card_text success=%s raw="%s"', i, bool(price is not None), raw_price_text)
+
+                    logger.debug('Interactive parse - item %d raw price: "%s"', i, raw_price_text)
 
                     # IMAGE
                     img_el = el.query_selector('img')
@@ -302,15 +950,30 @@ def captcha_interactive():
 
                     # LINK
                     link_el = el.query_selector('a')
-                    link = link_el.get_attribute('href') if link_el else None
-                    if link and link.startswith('/'):
-                        link = f"https://www.walmart.com{link}"
+                    raw_link = link_el.get_attribute('href') if link_el else None
+                    link = _normalize_product_link(raw_link)
+                    logger.debug('Interactive link parse item=%d run_id=%s raw_link=%s normalized_link=%s', i, scrape_run_id, raw_link, link)
 
                     # SHORT DESCRIPTION (if present on card)
-                    desc_el = el.query_selector('div.search-result-productdescription') or el.query_selector('div.prod-ProductCard-description')
-                    description = desc_el.inner_text().strip() if desc_el else 'Extracted via Interactive Mode'
+                    description, description_source = _extract_quick_description(el, i, name)
+                    if (not description) or (description_source == 'card:card_text_fallback'):
+                        kf_desc, kf_source = _extract_key_item_features(context, link, i)
+                        if kf_desc:
+                            description = kf_desc
+                            description_source = kf_source
+                            logger.info(
+                                'Interactive description replaced by key-features item=%d source=%s chars=%d run_id=%s',
+                                i, description_source, len(description), scrape_run_id
+                            )
 
-                    products.append({'name': name, 'price': price, 'image': image, 'link': link, 'description': description})
+                    products.append({
+                        'name': name,
+                        'price': price,
+                        'image': image,
+                        'link': link,
+                        'description': description,
+                        'description_source': description_source,
+                    })
                     logger.info('Parsed interactive item %d: %s — $%s', i, (name[:60] + '...') if len(name) > 60 else name, price)
                 except Exception as e:
                     logger.exception('Failed to parse interactive element %s', e)
